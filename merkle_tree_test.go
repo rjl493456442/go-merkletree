@@ -4,25 +4,79 @@
 package merkletree
 
 import (
+	"fmt"
+	"math/rand"
+	"reflect"
 	"testing"
+	"testing/quick"
 )
 
-func TestBuilding(t *testing.T) {
-	entries := []*Entry{
-		{[]byte{0x01, 0x02}, 0.25},
-		{[]byte{0x03, 0x04}, 0.125},
-		{[]byte{0x05, 0x06}, 0.03125},
-	}
-	tree, err := NewMerkleTree(entries)
+type merkleTreeTest struct {
+	err     error
+	entries []*Entry
+}
+
+func (t *merkleTreeTest) run() bool {
+	tree, err := NewMerkleTree(t.entries)
 	if err != nil {
-		t.Fatalf("Failed to build merkle tree: %v", err)
+		t.err = err
+		return false
 	}
-	hashes, err := tree.Prove(entries[0])
-	if err != nil {
-		t.Fatalf("Failed to generate merkle proof: %v", err)
+	for _, entry := range t.entries {
+		proof, err := tree.Prove(entry)
+		if err != nil {
+			t.err = err
+			return false
+		}
+		if err := VerifyProof(tree.Root.Hash(), proof); err != nil {
+			t.err = err
+			return false
+		}
 	}
-	err = VerifyProof(tree.Root.Hash(), hashes)
-	if err != nil {
-		t.Fatalf("Failed to prove merkle proof: %v", err)
+	return true
+}
+
+// Generate returns a new merkletree test of the given size. All randomness is
+// derived from r.
+func (*merkleTreeTest) Generate(r *rand.Rand, size int) reflect.Value {
+	var (
+		total   float64
+		entries []*Entry
+	)
+	for total < 1 {
+		remaining := 1 - total
+		for i := 0; i < len(validWeights); i++ {
+			if validWeights[i] <= remaining {
+				index := r.Intn(len(validWeights)-i) + i
+				value := make([]byte, 20)
+				r.Read(value)
+				entries = append(entries, &Entry{
+					Value:       value,
+					EntryWeight: validWeights[index],
+				})
+				total += validWeights[index]
+				break
+			}
+		}
+	}
+	return reflect.ValueOf(&merkleTreeTest{entries: entries})
+}
+
+func (t *merkleTreeTest) String() string {
+	var ret string
+	for index, entry := range t.entries {
+		ret += fmt.Sprintf("%d => (%f:%x)\n", index, entry.EntryWeight, entry.Value)
+	}
+	return ret
+}
+
+func TestMerkleTree(t *testing.T) {
+	config := &quick.Config{MaxCount: 10000}
+	err := quick.Check((*merkleTreeTest).run, config)
+	if cerr, ok := err.(*quick.CheckError); ok {
+		test := cerr.In[0].(*merkleTreeTest)
+		t.Errorf("%v:\n%s", test.err, test)
+	} else if err != nil {
+		t.Error(err)
 	}
 }

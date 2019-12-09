@@ -39,21 +39,11 @@ var (
 	ErrInvalidWeight = errors.New("invalid entry weight")
 
 	// ErrUnknownEntry is returned if caller wants to prove an non-existent entry.
-	ErrUnknownEntry = errors.New("the entry is non-existent to tree which is requested for proof")
+	ErrUnknownEntry = errors.New("the entry is non-existent requested for proof")
 
 	// ErrInvalidProof is returned if the provided merkle proof to verify is invalid.
 	ErrInvalidProof = errors.New("invalid merkle proof")
 )
-
-// node represents a merkle tree node or a data entry referenced by the merkle tree.
-type node interface {
-	// Hash returns the hash of data entry.
-	Hash() common.Hash
-
-	// Weight returns the weight of data entry. Note The weight value
-	// must be of the form 1/2 ^ N.
-	Weight() float64
-}
 
 // Entry represents the data entry referenced by the merkle tree.
 type Entry struct {
@@ -157,13 +147,30 @@ func NewMerkleTree(entries []*Entry) (*MerkleTree, error) {
 	sort.Sort(EntryByWeight(entries))
 
 	// Start to build the merkle tree, short circuit if there is only 1 entry.
+	root, leaves, err := newTree(entries)
+	if err != nil {
+		return nil, err
+	}
+	return &MerkleTree{Root: root, Leaves: leaves}, nil
+}
+
+func newTree(entries []*Entry) (*Node, []*Node, error) {
+	// Short circuit if we only have 1 entry, return it as the root node
+	// of sub tree.
 	if len(entries) == 1 {
-		return &MerkleTree{Root: &Node{Value: entries[0]}}, nil
+		n := &Node{Value: entries[0]}
+		return n, []*Node{n}, nil
 	}
 	var current *Node
 	var leaves []*Node
 	for i := 0; i < len(entries); {
+		// Because all nodes are sorted in descending order of weight,
+		// So the weight of first two nodes must be same and can be
+		// grouped as a sub tree.
 		if i == 0 {
+			if entries[0].Weight() != entries[1].Weight() {
+				return nil, nil, errors.New("invalid entries") // Should never happen
+			}
 			n1, n2 := &Node{Value: entries[0]}, &Node{Value: entries[1]}
 			current = &Node{Left: n1, Right: n2}
 			n1.Parent, n2.Parent = current, current
@@ -171,30 +178,37 @@ func NewMerkleTree(entries []*Entry) (*MerkleTree, error) {
 			leaves = append(leaves, n1, n2)
 			continue
 		}
-		if current.Weight() < entries[i].Weight() {
-			return nil, errors.New("invalid entry order")
-		} else if current.Weight() == entries[i].Weight() {
+		switch {
+		case current.Weight() < entries[i].Weight():
+			return nil, nil, errors.New("invalid entries") // Should never happen
+		case current.Weight() == entries[i].Weight():
 			n := &Node{Value: entries[i]}
 			tmp := &Node{Left: current, Right: n}
 			current.Parent, n.Parent = tmp, tmp
 			current = tmp
 			leaves = append(leaves, n)
 			i += 1
-		} else {
-			if len(entries)-i < 2 {
-				return nil, errors.New("incomplete tree")
+		default:
+			var j int
+			var subsum float64
+			for j = i; j < len(entries); j++ {
+				subsum += entries[j].Weight()
+				if subsum == current.Weight() {
+					break
+				}
 			}
-			n1, n2 := &Node{Value: entries[i]}, &Node{Value: entries[i+1]}
-			right := &Node{Left: n1, Right: n2}
-			n1.Parent, n2.Parent = right, right
+			right, subLeaves, err := newTree(entries[i : j+1])
+			if err != nil {
+				return nil, nil, err
+			}
 			tmp := &Node{Left: current, Right: right}
 			current.Parent, right.Parent = tmp, tmp
 			current = tmp
-			i += 2
-			leaves = append(leaves, n1, n2)
+			leaves = append(leaves, subLeaves...)
+			i += len(subLeaves)
 		}
 	}
-	return &MerkleTree{Root: current, Leaves: leaves}, nil
+	return current, leaves, nil
 }
 
 // Hash calculates the root hash of merkle tree.
@@ -230,22 +244,22 @@ func (t *MerkleTree) Prove(e *Entry) ([]common.Hash, error) {
 }
 
 // VerifyProof verifies the provided merkle proof is valid or not.
-func VerifyProof(root common.Hash, hashes []common.Hash) error {
-	if len(hashes) == 0 {
+func VerifyProof(root common.Hash, proof []common.Hash) error {
+	if len(proof) == 0 {
 		return ErrInvalidProof
 	}
-	if len(hashes) == 1 {
-		if root == hashes[0] {
+	if len(proof) == 1 {
+		if root == proof[0] {
 			return nil
 		}
 		return ErrInvalidProof
 	}
-	current := hashes[0]
-	for i := 1; i < len(hashes); i += 1 {
-		if bytes.Compare(current.Bytes(), hashes[i].Bytes()) < 0 {
-			current = crypto.Keccak256Hash(append(current.Bytes(), hashes[i].Bytes()...))
+	current := proof[0]
+	for i := 1; i < len(proof); i += 1 {
+		if bytes.Compare(current.Bytes(), proof[i].Bytes()) < 0 {
+			current = crypto.Keccak256Hash(append(current.Bytes(), proof[i].Bytes()...))
 		} else {
-			current = crypto.Keccak256Hash(append(hashes[i].Bytes(), current.Bytes()...))
+			current = crypto.Keccak256Hash(append(proof[i].Bytes(), current.Bytes()...))
 		}
 	}
 	if root != current {
