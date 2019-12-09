@@ -28,9 +28,10 @@ func (t *merkleTreeTest) run() bool {
 			t.err = err
 			return false
 		}
-		if err := VerifyProof(tree.Root.Hash(), proof); err != nil {
+		if _, _, err := VerifyProof(tree.Root.Hash(), proof); err != nil {
 			t.err = err
 			return false
+		} else {
 		}
 	}
 	return true

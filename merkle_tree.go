@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -244,28 +245,56 @@ func (t *MerkleTree) Prove(e *Entry) ([]common.Hash, error) {
 }
 
 // VerifyProof verifies the provided merkle proof is valid or not.
-func VerifyProof(root common.Hash, proof []common.Hash) error {
+//
+// Except returning the error indicates whether the proof is valid,
+// this function will also return the "position" of entry which is
+// proven.
+//
+// The merkle tree looks like:
+//
+//            e2     e3
+//             \     /
+//              \   /
+//               \ /
+//        e1     h2
+//         \     /
+//          \   /
+//           \ /
+//           h1     e4
+//            \     /
+//             \   /
+//              \ /
+//           root hash
+//
+// The position of the nodes is a range consisting of two points in
+// a one-dimensional coordinate system ranging from 0 to 1. Like the
+// position of e2 is [1/4, 3/8), the position of e3 is [3/8, 1/2).
+func VerifyProof(root common.Hash, proof []common.Hash) (float64, float64, error) {
 	if len(proof) == 0 {
-		return ErrInvalidProof
+		return 0, 0, ErrInvalidProof
 	}
 	if len(proof) == 1 {
 		if root == proof[0] {
-			return nil
+			return 0, 1, nil
 		}
-		return ErrInvalidProof
+		return 0, 0, ErrInvalidProof
 	}
-	current := proof[0]
+	var (
+		current = proof[0]
+		pos     float64
+	)
 	for i := 1; i < len(proof); i += 1 {
 		if bytes.Compare(current.Bytes(), proof[i].Bytes()) < 0 {
 			current = crypto.Keccak256Hash(append(current.Bytes(), proof[i].Bytes()...))
 		} else {
+			pos = pos + math.Pow(2, float64(i-1))
 			current = crypto.Keccak256Hash(append(proof[i].Bytes(), current.Bytes()...))
 		}
 	}
 	if root != current {
-		return ErrInvalidProof
+		return 0, 0, ErrInvalidProof
 	}
-	return nil
+	return pos / math.Pow(2, float64(len(proof)-1)), (pos + 1) / math.Pow(2, float64(len(proof)-1)), nil
 }
 
 // String returns the string format of tree which helps to debug.
