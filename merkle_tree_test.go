@@ -42,9 +42,11 @@ func (*merkleTreeTest) Generate(r *rand.Rand, size int) reflect.Value {
 	var (
 		total   float64
 		entries []*Entry
+		biases  = []float64{0.5, 0.25, 0.125, 0.0625, 03125, 0}
 	)
-	for total < 1 {
-		remaining := 1 - total
+	bias := biases[r.Intn(len(biases))]
+	for total+bias < 1 {
+		remaining := 1 - total - bias
 		for i := 0; i < len(validWeights); i++ {
 			if validWeights[i] <= remaining {
 				index := r.Intn(len(validWeights)-i) + i
