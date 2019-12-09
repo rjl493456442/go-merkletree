@@ -1,4 +1,4 @@
-module github.com/rjl493456442/go-merkle-tree
+module github.com/rjl493456442/go-merkletree
 
 go 1.13
 
