@@ -1,6 +1,19 @@
 // Copyright 2019 Gary Rong
 // Licensed under the MIT License, see LICENCE file for details.
 
+// merkletree package implements a merkle tree as the probability tree.
+// The basic idea is different entries referenced by this tree has different
+// position. The position of the tree node can be used as the probability range
+// of the node.
+//
+// All entries will have an initial weight, which represents the probability that
+// this node will be picked. Because the merkletree implemented in this package is
+// a binary tree, the weight of entry can only support the form of 1/2 ^ n.
+//
+// To simplify the verification process of merkle proof, the hash value calculation
+// process of the parent node, the left subtree hash value is smaller than the right
+// subtree hash value. So that we can get rid of building instructions when we try
+// to rebuild the tree based on the proof.
 package merkletree
 
 import (
@@ -132,7 +145,7 @@ func NewMerkleTree(entries []*Entry) (*MerkleTree, error) {
 	if sum > 1 {
 		return nil, ErrWeightSumOverflow
 	}
-	// Fill null entry if we can't form a completed merkle tree.
+	// Fill null entries if we can't form a completed merkle tree.
 	missing := 1 - sum
 	for missing > 0 {
 		for i := 0; i < len(validWeights); i++ {
@@ -165,7 +178,7 @@ func newTree(entries []*Entry) (*Node, []*Node, error) {
 	var current *Node
 	var leaves []*Node
 	for i := 0; i < len(entries); {
-		// Because all nodes are sorted in descending order of weight,
+		// Because all nodes are sorted in ascending order of weight,
 		// So the weight of first two nodes must be same and can be
 		// grouped as a sub tree.
 		if i == 0 {
@@ -223,6 +236,7 @@ func (t *MerkleTree) Prove(e *Entry) ([]common.Hash, error) {
 	for _, leaf := range t.Leaves {
 		if leaf.Value == e {
 			n = leaf
+			break
 		}
 	}
 	if n == nil {
@@ -269,6 +283,9 @@ func (t *MerkleTree) Prove(e *Entry) ([]common.Hash, error) {
 // The position of the nodes is a range consisting of two points in
 // a one-dimensional coordinate system ranging from 0 to 1. Like the
 // position of e2 is [1/4, 3/8), the position of e3 is [3/8, 1/2).
+//
+// The range formed by the two points of the range is the probability
+// range represented by this entry.
 func VerifyProof(root common.Hash, proof []common.Hash) (float64, float64, error) {
 	if len(proof) == 0 {
 		return 0, 0, ErrInvalidProof

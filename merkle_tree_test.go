@@ -4,9 +4,11 @@
 package merkletree
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"reflect"
+	"sort"
 	"testing"
 	"testing/quick"
 )
@@ -16,22 +18,52 @@ type merkleTreeTest struct {
 	entries []*Entry
 }
 
+type entryRange struct {
+	start float64
+	end   float64
+}
+
+// entryRanges implements the sort interface to allow sorting a list of entries
+// range by the start point.
+type entryRanges []entryRange
+
+func (s entryRanges) Len() int           { return len(s) }
+func (s entryRanges) Less(i, j int) bool { return s[i].start < s[j].start }
+func (s entryRanges) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
 func (t *merkleTreeTest) run() bool {
 	tree, err := NewMerkleTree(t.entries)
 	if err != nil {
 		t.err = err
 		return false
 	}
+	var ranges entryRanges
 	for _, entry := range t.entries {
 		proof, err := tree.Prove(entry)
 		if err != nil {
 			t.err = err
 			return false
 		}
-		if _, _, err := VerifyProof(tree.Root.Hash(), proof); err != nil {
+		if s, e, err := VerifyProof(tree.Root.Hash(), proof); err != nil {
 			t.err = err
 			return false
 		} else {
+			ranges = append(ranges, entryRange{s, e})
+		}
+	}
+	sort.Sort(ranges)
+	position := float64(0)
+	for i := 0; i < len(ranges); i++ {
+		if ranges[i].start != position {
+			t.err = errors.New("invalid probability range")
+			return false
+		}
+		position = ranges[i].end
+		if i == len(ranges)-1 {
+			if position != float64(1) {
+				t.err = fmt.Errorf("incomplete probability range, end:%f", position)
+				return false
+			}
 		}
 	}
 	return true
@@ -43,11 +75,9 @@ func (*merkleTreeTest) Generate(r *rand.Rand, size int) reflect.Value {
 	var (
 		total   float64
 		entries []*Entry
-		biases  = []float64{0.5, 0.25, 0.125, 0.0625, 03125, 0}
 	)
-	bias := biases[r.Intn(len(biases))]
-	for total+bias < 1 {
-		remaining := 1 - total - bias
+	for total < 1 {
+		remaining := 1 - total
 		for i := 0; i < len(validWeights); i++ {
 			if validWeights[i] <= remaining {
 				index := r.Intn(len(validWeights)-i) + i
@@ -82,4 +112,29 @@ func TestMerkleTree(t *testing.T) {
 	} else if err != nil {
 		t.Error(err)
 	}
+}
+
+func ExampleMerkleTree() {
+	entry1 := &Entry{
+		Value:       []byte{0x01,0x02},
+		EntryWeight: 0.5,
+	}
+	entry2 := &Entry{
+		Value:       []byte{0x03,0x04},
+		EntryWeight: 0.25,
+	}
+	tree, err := NewMerkleTree([]*Entry{entry1, entry2})
+	if err != nil {
+		fmt.Println(err)
+	}
+	proof, err := tree.Prove(entry1)
+	if err != nil {
+		fmt.Println(err)
+	}
+	s, e, err := VerifyProof(tree.Hash(), proof)
+	if err != nil {
+		fmt.Println(err)
+	}
+	fmt.Println(s, e)
+	// Output: 0 0.5
 }
