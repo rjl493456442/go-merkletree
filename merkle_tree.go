@@ -8,7 +8,7 @@
 //
 // All entries will have an initial weight, which represents the probability that
 // this node will be picked. Because the merkletree implemented in this package is
-// a binary tree, the weight of entry can only support the form of 1/2 ^ n.
+// a binary tree, so the final weight of each entry will be adjusted to 1/2^N format.
 //
 // To simplify the verification process of merkle proof, the hash value calculation
 // process of the parent node, the left subtree hash value is smaller than the right
@@ -24,33 +24,24 @@ import (
 	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
 var (
-	// validWeights includes all valid/supported entry weight.
-	//
-	// The minimal weight supported is 1/1024.
-	validWeights = []float64{1, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625, 0.0078125, 0.00390625, 0.001953125, 0.0009765625}
+	// maxLevel indicates the deepest Level the node can be. It means
+	// the minimal weight supported is 1/1024.
+	maxLevel = 10
 
-	// validWeightFlag is the mapping format of validWeights.
-	validWeightsFlag = make(map[float64]bool)
+	// maxWeight indicates the denominator used to calculate weight.
+	maxWeight = uint64(1) << 63
 )
 
-func init() {
-	for _, w := range validWeights {
-		validWeightsFlag[w] = true
-	}
-}
-
 var (
-	// ErrWeightSumOverflow is returned if the total weight of given entries
-	// exceeds 1.
-	ErrWeightSumOverflow = errors.New("the cumulative weight of entries overflow")
-
-	// ErrInvalidWeight is returned if the weight of entry doesn't obey 1/2^N form.
+	// ErrInvalidWeight is returned if the weight of entry is zero or too small.
 	ErrInvalidWeight = errors.New("invalid entry weight")
+
+	// ErrEmptyEntryList is returned if the given entry list is empty
+	ErrEmptyEntryList = errors.New("empty entry list is not allowed to build tree")
 
 	// ErrUnknownEntry is returned if caller wants to prove an non-existent entry.
 	ErrUnknownEntry = errors.New("the entry is non-existent requested for proof")
@@ -61,20 +52,29 @@ var (
 
 // Entry represents the data entry referenced by the merkle tree.
 type Entry struct {
-	Value       []byte
-	EntryWeight float64
+	Value  []byte  // The corresponding value of this entry
+	Weight uint64  // The initial weight specified by caller
+	Level  uint64  // The level of node which references this entry in the tree
+	bias   float64 // The bias between initial weight and the assigned weight
 }
 
 func (s *Entry) Hash() common.Hash { return crypto.Keccak256Hash(s.Value) }
-func (s *Entry) Weight() float64   { return s.EntryWeight }
 
-// EntryByWeight implements the sort interface to allow sorting a list of entries
-// by their weight.
-type EntryByWeight []*Entry
+// EntryByBias implements the sort interface to allow sorting a list of entries
+// by their weight bias.
+type EntryByBias []*Entry
 
-func (s EntryByWeight) Len() int           { return len(s) }
-func (s EntryByWeight) Less(i, j int) bool { return s[i].EntryWeight < s[j].EntryWeight }
-func (s EntryByWeight) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+func (s EntryByBias) Len() int           { return len(s) }
+func (s EntryByBias) Less(i, j int) bool { return s[i].bias < s[j].bias }
+func (s EntryByBias) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
+// EntryByLevel implements the sort interface to allow sorting a list of entries
+// by their position in the tree in descending order.
+type EntryByLevel []*Entry
+
+func (s EntryByLevel) Len() int           { return len(s) }
+func (s EntryByLevel) Less(i, j int) bool { return s[i].Level > s[j].Level }
+func (s EntryByLevel) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
 // Node represents a node in merkle tree.
 type Node struct {
@@ -82,6 +82,7 @@ type Node struct {
 	Parent   *Node       // The parent of this node, nil if it's root node.
 	Left     *Node       // The left child of this node
 	Right    *Node       // The right child of this node
+	Level    uint64      // The level of node in this tree
 	Value    *Entry      // The referenced entry by this node, nil if it's not leaf.
 }
 
@@ -106,22 +107,10 @@ func (node *Node) Hash() common.Hash {
 	return node.Nodehash
 }
 
-// Weight returns the weight of this tree node.
-func (node *Node) Weight() float64 {
-	if node.Value != nil {
-		return node.Value.Weight()
-	}
-	return node.Left.Weight() + node.Right.Weight()
-}
-
 // String returns the string format of node.
 func (node *Node) String() string {
 	if node.Value != nil {
-		value := hexutil.Encode(node.Value.Value)
-		if node.Value.Value == nil {
-			value = "null"
-		}
-		return fmt.Sprintf("E(%s:%f)", value, node.Value.EntryWeight)
+		return fmt.Sprintf("E(%x:%d)", node.Value.Value, node.Value.Level)
 	}
 	return fmt.Sprintf("N(%x) => L.(%s) R.(%s)", node.Hash(), node.Left.String(), node.Right.String())
 }
@@ -132,33 +121,52 @@ type MerkleTree struct {
 	Leaves   []*Node     // Batch of leaves node included in the tree.
 }
 
+// NewMerkleTree constructs a merkle tree with given entries.
 func NewMerkleTree(entries []*Entry) (*MerkleTree, error) {
+	if len(entries) == 0 {
+		return nil, ErrEmptyEntryList
+	}
 	// Verify the validity of the given entries.
-	var sum float64
+	var sum, totalWeight uint64
 	for _, entry := range entries {
-		weight := entry.Weight()
-		if !validWeightsFlag[weight] {
+		if entry.Weight == 0 {
 			return nil, ErrInvalidWeight
 		}
-		sum += weight
+		sum += entry.Weight
 	}
-	if sum > 1 {
-		return nil, ErrWeightSumOverflow
+	for _, entry := range entries {
+		l := math.Log2(float64(sum) / float64(entry.Weight))
+		c := math.Ceil(l)
+		entry.bias = l - c + 1
+		if int(c) > maxLevel {
+			return nil, ErrInvalidWeight
+		}
+		totalWeight += maxWeight >> int(c)
+		entry.Level = uint64(c)
 	}
-	// Fill null entries if we can't form a completed merkle tree.
-	missing := 1 - sum
-	for missing > 0 {
-		for i := 0; i < len(validWeights); i++ {
-			if missing >= validWeights[i] {
-				// Full empty data entry in order to form a completed tree.
-				entries = append(entries, &Entry{EntryWeight: validWeights[i]})
-				missing -= validWeights[i]
-				break
+	sort.Sort(EntryByBias(entries))
+
+	// Bump the weight of entry if we can't reach 100%
+	shift := entries
+	for totalWeight < maxWeight && len(shift) > 0 {
+		var limit int
+		for index, entry := range shift {
+			addWeight := maxWeight >> entry.Level
+			if totalWeight+addWeight <= maxWeight {
+				totalWeight += addWeight
+				entry.Level -= 1
+				if index != limit {
+					shift[limit], shift[index] = shift[index], shift[limit]
+				}
+				limit += 1
+				if totalWeight == maxWeight {
+					break
+				}
 			}
 		}
+		shift = shift[:limit]
 	}
-	// Sort them based on the weight in ascending order.
-	sort.Sort(EntryByWeight(entries))
+	sort.Sort(EntryByLevel(entries))
 
 	// Start to build the merkle tree, short circuit if there is only 1 entry.
 	root, leaves, err := newTree(entries)
@@ -172,42 +180,42 @@ func newTree(entries []*Entry) (*Node, []*Node, error) {
 	// Short circuit if we only have 1 entry, return it as the root node
 	// of sub tree.
 	if len(entries) == 1 {
-		n := &Node{Value: entries[0]}
+		n := &Node{Value: entries[0], Level: 0}
 		return n, []*Node{n}, nil
 	}
 	var current *Node
 	var leaves []*Node
 	for i := 0; i < len(entries); {
-		// Because all nodes are sorted in ascending order of weight,
-		// So the weight of first two nodes must be same and can be
+		// Because all nodes are sorted in descending order of level,
+		// So the level of first two nodes must be same and can be
 		// grouped as a sub tree.
 		if i == 0 {
-			if entries[0].Weight() != entries[1].Weight() {
+			if entries[0].Level != entries[1].Level {
 				return nil, nil, errors.New("invalid entries") // Should never happen
 			}
-			n1, n2 := &Node{Value: entries[0]}, &Node{Value: entries[1]}
-			current = &Node{Left: n1, Right: n2}
+			n1, n2 := &Node{Value: entries[0], Level: entries[0].Level}, &Node{Value: entries[1], Level: entries[1].Level}
+			current = &Node{Left: n1, Right: n2, Level: entries[0].Level - 1}
 			n1.Parent, n2.Parent = current, current
 			i += 2
 			leaves = append(leaves, n1, n2)
 			continue
 		}
 		switch {
-		case current.Weight() < entries[i].Weight():
+		case current.Level > entries[i].Level:
 			return nil, nil, errors.New("invalid entries") // Should never happen
-		case current.Weight() == entries[i].Weight():
-			n := &Node{Value: entries[i]}
-			tmp := &Node{Left: current, Right: n}
+		case current.Level == entries[i].Level:
+			n := &Node{Value: entries[i], Level: entries[i].Level}
+			tmp := &Node{Left: current, Right: n, Level: current.Level - 1}
 			current.Parent, n.Parent = tmp, tmp
 			current = tmp
 			leaves = append(leaves, n)
 			i += 1
 		default:
 			var j int
-			var subsum float64
+			var weight uint64
 			for j = i; j < len(entries); j++ {
-				subsum += entries[j].Weight()
-				if subsum == current.Weight() {
+				weight += maxWeight >> entries[j].Level
+				if weight == maxWeight>>current.Level {
 					break
 				}
 			}
@@ -215,7 +223,7 @@ func newTree(entries []*Entry) (*Node, []*Node, error) {
 			if err != nil {
 				return nil, nil, err
 			}
-			tmp := &Node{Left: current, Right: right}
+			tmp := &Node{Left: current, Right: right, Level: current.Level - 1}
 			current.Parent, right.Parent = tmp, tmp
 			current = tmp
 			leaves = append(leaves, subLeaves...)
@@ -234,7 +242,7 @@ func (t *MerkleTree) Hash() common.Hash {
 func (t *MerkleTree) Prove(e *Entry) ([]common.Hash, error) {
 	var n *Node
 	for _, leaf := range t.Leaves {
-		if leaf.Value == e {
+		if bytes.Equal(leaf.Value.Value, e.Value) {
 			n = leaf
 			break
 		}
@@ -280,38 +288,36 @@ func (t *MerkleTree) Prove(e *Entry) ([]common.Hash, error) {
 //              \ /
 //           root hash
 //
-// The position of the nodes is a range consisting of two points in
-// a one-dimensional coordinate system ranging from 0 to 1. Like the
-// position of e2 is [1/4, 3/8), the position of e3 is [3/8, 1/2).
-//
-// The range formed by the two points of the range is the probability
-// range represented by this entry.
-func VerifyProof(root common.Hash, proof []common.Hash) (float64, float64, error) {
+// The position of the nodes is essentially is the path from root
+// node to target node. Like the position of e2 is 010 => 2, while
+// for e3 the position is 011 => 3. Combine with the level node is
+// in, we can calculate the probability range represented by this entry.
+func VerifyProof(root common.Hash, proof []common.Hash) (uint64, error) {
 	if len(proof) == 0 {
-		return 0, 0, ErrInvalidProof
+		return 0, ErrInvalidProof
 	}
 	if len(proof) == 1 {
 		if root == proof[0] {
-			return 0, 1, nil
+			return 0, nil
 		}
-		return 0, 0, ErrInvalidProof
+		return 0, ErrInvalidProof
 	}
 	var (
 		current = proof[0]
-		pos     float64
+		pos     uint64
 	)
 	for i := 1; i < len(proof); i += 1 {
 		if bytes.Compare(current.Bytes(), proof[i].Bytes()) < 0 {
 			current = crypto.Keccak256Hash(append(current.Bytes(), proof[i].Bytes()...))
 		} else {
-			pos = pos + math.Pow(2, float64(i-1))
+			pos = pos + 1<<(i-1)
 			current = crypto.Keccak256Hash(append(proof[i].Bytes(), current.Bytes()...))
 		}
 	}
 	if root != current {
-		return 0, 0, ErrInvalidProof
+		return 0, ErrInvalidProof
 	}
-	return pos / math.Pow(2, float64(len(proof)-1)), (pos + 1) / math.Pow(2, float64(len(proof)-1)), nil
+	return pos, nil
 }
 
 // String returns the string format of tree which helps to debug.
